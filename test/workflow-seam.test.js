@@ -364,3 +364,63 @@ test('POST /executions rejects unexpected schemes for live execution baseUrl', a
     await once(server, 'close');
   }
 });
+
+test('POST /executions accepts IPv6 loopback baseUrl values for live execution', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agentbrowser-'));
+  const { server } = await createServer({ dataRoot: root });
+  server.listen(0, '::1');
+  await once(server, 'listening');
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+
+    const captureResponse = await fetch(`http://[::1]:${address.port}/captures`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        title: 'IPv6 loopback execution',
+        goal: 'Allow approved IPv6 loopback live execution targets',
+        steps: [
+          { action: 'Open dashboard', target: '/dashboard', expectedOutput: 'Dashboard renders', validationCheck: 'Main heading is visible' },
+          { action: 'Click export', target: '#export', expectedOutput: 'Export starts', validationCheck: 'Export toast appears' }
+        ]
+      })
+    });
+    assert.equal(captureResponse.status, 201);
+    const created = await captureResponse.json();
+
+    const saveResponse = await fetch(`http://[::1]:${address.port}/workflows`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        draftId: created.draft.draftId,
+        editor: 'runtime-integration-specialist',
+        workflow: created.draft.workflow
+      })
+    });
+    assert.equal(saveResponse.status, 201);
+    const saved = await saveResponse.json();
+
+    const executionResponse = await fetch(`http://[::1]:${address.port}/executions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        workflowId: saved.saved.workflowId,
+        executor: 'browser-use',
+        mode: 'browser-use-live',
+        input: {
+          source: 'saved-workflow-review',
+          baseUrl: `http://[::1]:${address.port}`
+        }
+      })
+    });
+    assert.equal(executionResponse.status, 201);
+    const executed = await executionResponse.json();
+    assert.equal(executed.execution.validation.status, 'passed');
+    assert.equal(executed.execution.stepResults[0].runtimeRequest.statusCode, 200);
+    assert.equal(executed.execution.stepResults[1].runtimeRequest.statusCode, 201);
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});

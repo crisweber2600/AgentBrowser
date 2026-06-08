@@ -332,7 +332,11 @@ function buildAllowedRuntimeUrl(targetPath, baseUrl) {
 
 function isAllowedRuntimeHost(hostname) {
   const normalizedHost = hostname.toLowerCase();
-  return normalizedHost === '127.0.0.1' || normalizedHost === 'localhost' || normalizedHost === '::1';
+  const canonicalHost = normalizedHost.startsWith('[') && normalizedHost.endsWith(']')
+    ? normalizedHost.slice(1, -1)
+    : normalizedHost;
+
+  return canonicalHost === '127.0.0.1' || canonicalHost === 'localhost' || canonicalHost === '::1';
 }
 
 function bodyIncludesValidation(body, validationCheck, expectedOutput) {
