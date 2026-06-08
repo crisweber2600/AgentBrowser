@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import { mkdtemp, readFile } from 'node:fs/promises';
+import { once } from 'node:events';
 import { WorkflowStore } from '../src/workflow-store.js';
+import { createServer } from '../src/server.js';
 
 test('raw capture, generated draft, and saved workflow preserve provenance', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agentbrowser-'));
@@ -63,4 +65,88 @@ test('raw capture, generated draft, and saved workflow preserve provenance', asy
   const rawPath = path.join(root, 'raw-captures', `${raw.captureId}.json`);
   const rawOnDisk = JSON.parse(await readFile(rawPath, 'utf8'));
   assert.equal(rawOnDisk.payload.goal, 'Turn a browser demo into an editable workflow package');
+});
+
+test('POST /captures rejects malformed workflow capture payloads', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agentbrowser-'));
+  const { server } = await createServer({ dataRoot: root });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/captures`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Missing steps capture',
+        goal: 'Reject malformed capture payload',
+        steps: []
+      })
+    });
+
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: 'steps must be a non-empty array' });
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
+test('POST /workflows rejects malformed save payloads', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agentbrowser-'));
+  const { server } = await createServer({ dataRoot: root });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+
+    const captureResponse = await fetch(`http://127.0.0.1:${address.port}/captures`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Valid capture',
+        goal: 'Create a draft first',
+        steps: [
+          {
+            action: 'Open page',
+            target: '/workflows',
+            expectedOutput: 'Workflow page renders'
+          }
+        ]
+      })
+    });
+    assert.equal(captureResponse.status, 201);
+    const created = await captureResponse.json();
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/workflows`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        draftId: created.draft.draftId,
+        editor: 'runtime-integration-specialist',
+        workflow: {
+          title: 'Broken workflow',
+          goal: 'Reject malformed saved workflow payload',
+          steps: [
+            {
+              action: '',
+              target: '/workflows',
+              expectedOutput: 'Should fail validation'
+            }
+          ]
+        }
+      })
+    });
+
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: 'steps[0].action must be a non-empty string' });
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
 });
