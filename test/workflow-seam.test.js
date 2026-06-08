@@ -37,6 +37,8 @@ test('raw capture, generated draft, and saved workflow preserve provenance', asy
   assert.equal(draft.provenance.rawCaptureId, raw.captureId);
   assert.equal(draft.workflow.steps.length, 2);
   assert.ok(draft.workflow.browserUsePromptPlaceholder);
+  assert.equal(draft.fieldProvenance.goal.sourcePath, 'payload.goal');
+  assert.equal(draft.fieldProvenance.steps[0].action.value, 'Open uploads page');
   assert.deepEqual(Object.keys(draft.workflow).sort(), [
     'browserUsePromptPlaceholder',
     'constraints',
@@ -61,6 +63,7 @@ test('raw capture, generated draft, and saved workflow preserve provenance', asy
   assert.equal(saved.provenance.draftId, draft.draftId);
   assert.equal(saved.provenance.rawCaptureId, raw.captureId);
   assert.equal(saved.workflow.goal, 'Edited workflow goal');
+  assert.equal(saved.fieldProvenance.goal.value, raw.payload.goal);
 
   const rawPath = path.join(root, 'raw-captures', `${raw.captureId}.json`);
   const rawOnDisk = JSON.parse(await readFile(rawPath, 'utf8'));
@@ -145,6 +148,50 @@ test('POST /workflows rejects malformed save payloads', async () => {
 
     assert.equal(response.status, 400);
     assert.deepEqual(await response.json(), { error: 'steps[0].action must be a non-empty string' });
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
+test('review page exposes editable workflow JSON and provenance for a generated draft', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agentbrowser-'));
+  const { server } = await createServer({ dataRoot: root });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+
+    const captureResponse = await fetch(`http://127.0.0.1:${address.port}/captures`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Reviewable capture',
+        goal: 'Render review surface',
+        steps: [
+          {
+            action: 'Click record',
+            target: '#record',
+            expectedOutput: 'Recording starts',
+            validationCheck: 'Timer increments'
+          }
+        ]
+      })
+    });
+    assert.equal(captureResponse.status, 201);
+    const created = await captureResponse.json();
+
+    const reviewResponse = await fetch(`http://127.0.0.1:${address.port}${created.reviewSurface.reviewUrl}`);
+    assert.equal(reviewResponse.status, 200);
+    const reviewHtml = await reviewResponse.text();
+
+    assert.match(reviewHtml, /Workflow review and save/);
+    assert.match(reviewHtml, /Editable workflow package/);
+    assert.match(reviewHtml, /Field provenance/);
+    assert.match(reviewHtml, /&quot;sourcePath&quot;: &quot;payload\.goal&quot;/);
+    assert.match(reviewHtml, /&quot;value&quot;: &quot;Render review surface&quot;/);
   } finally {
     server.close();
     await once(server, 'close');

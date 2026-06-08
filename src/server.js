@@ -18,6 +18,11 @@ function json(res, statusCode, payload) {
   res.end(JSON.stringify(payload, null, 2));
 }
 
+function html(res, statusCode, body) {
+  res.writeHead(statusCode, { 'content-type': 'text/html; charset=utf-8' });
+  res.end(body);
+}
+
 async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) {
@@ -77,6 +82,88 @@ function validateSaveWorkflowPayload(payload) {
   validateWorkflowForSave(payload.workflow);
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
+
+function renderReviewPage(draft) {
+  const workflowJson = JSON.stringify(draft.workflow, null, 2);
+  const provenanceJson = JSON.stringify(draft.fieldProvenance ?? {}, null, 2);
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(draft.workflow.title)} Review</title>
+  <style>
+    :root { color-scheme: light dark; font-family: sans-serif; }
+    body { margin: 2rem; max-width: 1100px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+    textarea { width: 100%; min-height: 24rem; font-family: monospace; }
+    pre { white-space: pre-wrap; word-break: break-word; padding: 1rem; border: 1px solid #9994; border-radius: 8px; }
+    button { padding: 0.7rem 1rem; }
+    .meta { margin-bottom: 1rem; }
+    .status { margin-top: 1rem; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Workflow review and save</h1>
+  <div class="meta">
+    <div><strong>Draft ID:</strong> ${escapeHtml(draft.draftId)}</div>
+    <div><strong>Raw capture ID:</strong> ${escapeHtml(draft.provenance.rawCaptureId)}</div>
+    <div><strong>Generated at:</strong> ${escapeHtml(draft.generatedAt)}</div>
+  </div>
+  <div class="grid">
+    <section>
+      <h2>Editable workflow package</h2>
+      <textarea id="workflow-editor">${escapeHtml(workflowJson)}</textarea>
+      <p>Edit the generated workflow JSON, then save a durable version.</p>
+      <button id="save-button">Save workflow version</button>
+      <div class="status" id="save-status"></div>
+    </section>
+    <section>
+      <h2>Field provenance</h2>
+      <pre id="provenance-view">${escapeHtml(provenanceJson)}</pre>
+    </section>
+  </div>
+  <script>
+    const saveButton = document.getElementById('save-button');
+    const saveStatus = document.getElementById('save-status');
+    saveButton.addEventListener('click', async () => {
+      saveStatus.textContent = 'Saving…';
+      let workflow;
+      try {
+        workflow = JSON.parse(document.getElementById('workflow-editor').value);
+      } catch (error) {
+        saveStatus.textContent = 'Workflow JSON must be valid before saving.';
+        return;
+      }
+
+      const response = await fetch('/workflows', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          draftId: ${JSON.stringify(draft.draftId)},
+          editor: 'review-ui',
+          workflow
+        })
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        saveStatus.textContent = payload.error || 'Save failed';
+        return;
+      }
+      saveStatus.textContent = 'Saved ' + payload.saved.workflowId + ' at ' + payload.saved.savedAt;
+    });
+  </script>
+</body>
+</html>`;
+}
+
 export async function createServer({ dataRoot = process.env.WORKFLOW_DATA_DIR || path.join(process.cwd(), '.runtime-artifacts') } = {}) {
   await mkdir(dataRoot, { recursive: true });
   const store = new WorkflowStore(dataRoot);
@@ -86,6 +173,10 @@ export async function createServer({ dataRoot = process.env.WORKFLOW_DATA_DIR ||
     try {
       if (req.method === 'GET' && req.url === '/health') {
         return json(res, 200, { ok: true, dataRoot, hostname: os.hostname() });
+      }
+
+      if (req.method === 'GET' && req.url === '/') {
+        return html(res, 200, '<!doctype html><html><body><h1>AgentBrowser Phase 1</h1><p>POST /captures to record a session, then open /review/&lt;draftId&gt; to inspect, edit, and save it.</p></body></html>');
       }
 
       if (req.method === 'POST' && req.url === '/captures') {
@@ -98,7 +189,8 @@ export async function createServer({ dataRoot = process.env.WORKFLOW_DATA_DIR ||
           draft,
           reviewSurface: {
             rawCapturePath: path.join(dataRoot, 'raw-captures', `${rawCapture.captureId}.json`),
-            draftPath: path.join(dataRoot, 'generated-drafts', `${draft.draftId}.json`)
+            draftPath: path.join(dataRoot, 'generated-drafts', `${draft.draftId}.json`),
+            reviewUrl: `/review/${draft.draftId}`
           }
         });
       }
@@ -106,6 +198,12 @@ export async function createServer({ dataRoot = process.env.WORKFLOW_DATA_DIR ||
       if (req.method === 'GET' && req.url?.startsWith('/drafts/')) {
         const draftId = req.url.split('/').at(-1);
         return json(res, 200, await store.getDraft(draftId));
+      }
+
+      if (req.method === 'GET' && req.url?.startsWith('/review/')) {
+        const draftId = req.url.split('/').at(-1);
+        const draft = await store.getDraft(draftId);
+        return html(res, 200, renderReviewPage(draft));
       }
 
       if (req.method === 'POST' && req.url === '/workflows') {
