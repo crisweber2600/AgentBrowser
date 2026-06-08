@@ -217,8 +217,11 @@ test('saved workflow can execute into a durable validation artifact', async () =
       body: JSON.stringify({
         workflowId: saved.saved.workflowId,
         executor: 'browser-use',
-        mode: 'browser-use-simulated',
-        input: { source: 'saved-workflow-review' }
+        mode: 'browser-use-live',
+        input: {
+          source: 'saved-workflow-review',
+          baseUrl: `http://127.0.0.1:${address.port}`
+        }
       })
     });
     assert.equal(executionResponse.status, 201);
@@ -227,11 +230,17 @@ test('saved workflow can execute into a durable validation artifact', async () =
     assert.equal(executed.execution.validation.status, 'passed');
     assert.equal(executed.execution.stepResults.length, 2);
     assert.ok(executed.execution.executionChecksum);
+    assert.equal(executed.execution.mode, 'browser-use-live');
+    assert.equal(executed.execution.stepResults[0].runtimeRequest.statusCode, 200);
+    assert.equal(executed.execution.stepResults[1].runtimeRequest.statusCode, 201);
+    assert.equal(executed.execution.stepResults[1].outputArtifact.status, 'validated');
+    assert.equal(executed.execution.finalOutput.exportedArtifacts.length, 1);
 
     const persisted = JSON.parse(await readFile(executed.executionPath, 'utf8'));
     assert.equal(persisted.executor, 'browser-use');
     assert.equal(persisted.finalOutput.status, 'validated');
     assert.equal(persisted.provenance.rawCaptureId, created.rawCapture.captureId);
+    assert.equal(persisted.stepResults[1].outputArtifact.status, 'validated');
   } finally {
     server.close();
     await once(server, 'close');

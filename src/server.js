@@ -90,7 +90,16 @@ function validateExecuteWorkflowPayload(payload) {
   }
   if (payload.input !== undefined) {
     assertObject(payload.input, 'input');
+    assertNonEmptyString(payload.input.baseUrl, 'input.baseUrl');
   }
+}
+
+function validateRuntimeExportPayload(payload) {
+  assertObject(payload, 'runtime export payload');
+  assertNonEmptyString(payload.workflowId, 'workflowId');
+  assertNonEmptyString(payload.executionId, 'executionId');
+  assertNonEmptyString(payload.selector, 'selector');
+  assertNonEmptyString(payload.action, 'action');
 }
 
 function validateRecordingStartPayload(payload) {
@@ -280,6 +289,24 @@ function renderReviewPage(draft) {
 </html>`;
 }
 
+function renderDashboardPage() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Workflow Dashboard</title>
+</head>
+<body>
+  <main>
+    <h1>Main heading is visible</h1>
+    <p>Dashboard renders</p>
+    <button id="export">Export</button>
+    <div id="export-toast">Export toast appears</div>
+  </main>
+</body>
+</html>`;
+}
+
 export async function createServer({ dataRoot = process.env.WORKFLOW_DATA_DIR || path.join(process.cwd(), '.runtime-artifacts') } = {}) {
   await mkdir(dataRoot, { recursive: true });
   const store = new WorkflowStore(dataRoot);
@@ -357,6 +384,10 @@ export async function createServer({ dataRoot = process.env.WORKFLOW_DATA_DIR ||
         return html(res, 200, renderReviewPage(draft));
       }
 
+      if (req.method === 'GET' && req.url === '/dashboard') {
+        return html(res, 200, renderDashboardPage());
+      }
+
       if (req.method === 'POST' && req.url === '/workflows') {
         const body = await readBody(req);
         validateSaveWorkflowPayload(body);
@@ -384,6 +415,21 @@ export async function createServer({ dataRoot = process.env.WORKFLOW_DATA_DIR ||
           execution,
           executionPath: path.join(dataRoot, 'workflow-executions', `${execution.executionId}.json`)
         });
+      }
+
+      if (req.method === 'POST' && req.url === '/runtime/export') {
+        const body = await readBody(req);
+        validateRuntimeExportPayload(body);
+        const output = await store.createRuntimeOutput({
+          workflowId: body.workflowId,
+          executionId: body.executionId,
+          selector: body.selector,
+          action: body.action,
+          status: 'validated',
+          readbackPath: `/exports/${body.workflowId}/${body.executionId}`,
+          requestInput: body.input ?? {}
+        });
+        return json(res, 201, output);
       }
 
       if (req.method === 'GET' && /^\/executions\/[^/]+$/.test(req.url || '')) {

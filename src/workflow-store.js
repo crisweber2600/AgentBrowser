@@ -18,6 +18,7 @@ export class WorkflowStore {
     this.draftDir = path.join(rootDir, 'generated-drafts');
     this.savedDir = path.join(rootDir, 'saved-workflows');
     this.executionDir = path.join(rootDir, 'workflow-executions');
+    this.runtimeOutputDir = path.join(rootDir, 'runtime-outputs');
   }
 
   async init() {
@@ -26,7 +27,8 @@ export class WorkflowStore {
       mkdir(this.rawDir, { recursive: true }),
       mkdir(this.draftDir, { recursive: true }),
       mkdir(this.savedDir, { recursive: true }),
-      mkdir(this.executionDir, { recursive: true })
+      mkdir(this.executionDir, { recursive: true }),
+      mkdir(this.runtimeOutputDir, { recursive: true })
     ]);
   }
 
@@ -148,20 +150,36 @@ export class WorkflowStore {
     return items.sort((a, b) => a.savedAt.localeCompare(b.savedAt));
   }
 
-  async executeWorkflow({ workflowId, executor, mode = 'browser-use-simulated', input = {} }) {
+  async createRuntimeOutput(payload) {
+    const outputId = `runtime_output_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+    const output = {
+      outputId,
+      createdAt: nowIso(),
+      ...payload
+    };
+    await writeJson(path.join(this.runtimeOutputDir, `${outputId}.json`), output);
+    return output;
+  }
+
+  async executeWorkflow({ workflowId, executor, mode = 'browser-use-live', input = {} }) {
     const savedWorkflow = await this.getSavedWorkflow(workflowId);
     const workflow = savedWorkflow.workflow;
     const executionId = `execution_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
-    const stepResults = workflow.steps.map((step) => ({
-      stepNumber: step.stepNumber,
-      action: step.action,
-      target: step.target,
-      expectedOutput: step.expectedOutput,
-      status: 'completed',
-      validationCheck: step.validationCheck,
-      observedOutput: step.expectedOutput,
-      executedAt: nowIso()
-    }));
+    const baseUrl = normalizeBaseUrl(input.baseUrl);
+    const stepResults = [];
+
+    for (const step of workflow.steps) {
+      stepResults.push(await executeWorkflowStep({
+        step,
+        baseUrl,
+        executionId,
+        workflowId,
+        input,
+        store: this
+      }));
+    }
+
+    const exportedArtifacts = stepResults.filter((result) => result.outputArtifact).map((result) => result.outputArtifact);
 
     const execution = {
       executionId,
@@ -188,7 +206,8 @@ export class WorkflowStore {
         status: 'validated',
         completedStepCount: stepResults.length,
         expectedOutputs: workflow.expectedOutputs,
-        observedOutputs: stepResults.map((result) => result.observedOutput)
+        observedOutputs: stepResults.map((result) => result.observedOutput),
+        exportedArtifacts
       }
     };
 
@@ -206,6 +225,93 @@ export class WorkflowStore {
   async getExecution(executionId) {
     return readJson(path.join(this.executionDir, `${executionId}.json`));
   }
+}
+
+function normalizeBaseUrl(value) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error('input.baseUrl must be a non-empty string for live workflow execution');
+  }
+  return value.endsWith('/') ? value.slice(0, -1) : value;
+}
+
+async function executeWorkflowStep({ step, baseUrl, executionId, workflowId, input, store }) {
+  if (step.target.startsWith('/')) {
+    const url = new URL(step.target, `${baseUrl}/`).toString();
+    const response = await fetch(url);
+    const body = await response.text();
+    const validationPassed = response.ok && bodyIncludesValidation(body, step.validationCheck, step.expectedOutput);
+
+    return {
+      stepNumber: step.stepNumber,
+      action: step.action,
+      target: step.target,
+      expectedOutput: step.expectedOutput,
+      status: validationPassed ? 'completed' : 'failed',
+      validationCheck: step.validationCheck,
+      observedOutput: summarizeObservedOutput(body, step.expectedOutput),
+      executedAt: nowIso(),
+      runtimeRequest: {
+        method: 'GET',
+        url,
+        statusCode: response.status
+      }
+    };
+  }
+
+  if (step.target.startsWith('#')) {
+    const url = new URL('/runtime/export', `${baseUrl}/`).toString();
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        workflowId,
+        executionId,
+        selector: step.target,
+        action: step.action,
+        input
+      })
+    });
+    const outputArtifact = await response.json();
+    const validationPassed = response.ok && typeof outputArtifact.outputId === 'string';
+
+    return {
+      stepNumber: step.stepNumber,
+      action: step.action,
+      target: step.target,
+      expectedOutput: step.expectedOutput,
+      status: validationPassed ? 'completed' : 'failed',
+      validationCheck: step.validationCheck,
+      observedOutput: outputArtifact.status ?? 'runtime export attempted',
+      executedAt: nowIso(),
+      runtimeRequest: {
+        method: 'POST',
+        url,
+        statusCode: response.status
+      },
+      outputArtifact: {
+        outputId: outputArtifact.outputId,
+        path: path.join(store.runtimeOutputDir, `${outputArtifact.outputId}.json`),
+        status: outputArtifact.status
+      }
+    };
+  }
+
+  throw new Error(`Unsupported workflow step target: ${step.target}`);
+}
+
+function bodyIncludesValidation(body, validationCheck, expectedOutput) {
+  const checks = [validationCheck, expectedOutput]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .map((value) => value.toLowerCase());
+  const loweredBody = body.toLowerCase();
+  return checks.some((value) => loweredBody.includes(value.toLowerCase())) || checks.length === 0;
+}
+
+function summarizeObservedOutput(body, expectedOutput) {
+  if (typeof expectedOutput === 'string' && expectedOutput && body.includes(expectedOutput)) {
+    return expectedOutput;
+  }
+  return body.replace(/\s+/g, ' ').trim().slice(0, 160);
 }
 
 export function buildWorkflowPackage(payload, steps) {
