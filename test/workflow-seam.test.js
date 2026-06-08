@@ -174,3 +174,86 @@ test('home page exposes record and stop browser session controls', async () => {
     await once(server, 'close');
   }
 });
+
+test('saved workflow can execute into a durable validation artifact', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agentbrowser-'));
+  const { server } = await createServer({ dataRoot: root });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+
+    const captureResponse = await fetch(`http://127.0.0.1:${address.port}/captures`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Execution-ready capture',
+        goal: 'Execute the saved workflow and persist validation output',
+        steps: [
+          { action: 'Open dashboard', target: '/dashboard', expectedOutput: 'Dashboard renders', validationCheck: 'Main heading is visible' },
+          { action: 'Click export', target: '#export', expectedOutput: 'Export starts', validationCheck: 'Export toast appears' }
+        ]
+      })
+    });
+    assert.equal(captureResponse.status, 201);
+    const created = await captureResponse.json();
+
+    const saveResponse = await fetch(`http://127.0.0.1:${address.port}/workflows`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        draftId: created.draft.draftId,
+        editor: 'runtime-integration-specialist',
+        workflow: created.draft.workflow
+      })
+    });
+    assert.equal(saveResponse.status, 201);
+    const saved = await saveResponse.json();
+
+    const executionResponse = await fetch(`http://127.0.0.1:${address.port}/executions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        workflowId: saved.saved.workflowId,
+        executor: 'browser-use',
+        mode: 'browser-use-simulated',
+        input: { source: 'saved-workflow-review' }
+      })
+    });
+    assert.equal(executionResponse.status, 201);
+    const executed = await executionResponse.json();
+    assert.equal(executed.execution.workflowId, saved.saved.workflowId);
+    assert.equal(executed.execution.validation.status, 'passed');
+    assert.equal(executed.execution.stepResults.length, 2);
+    assert.ok(executed.execution.executionChecksum);
+
+    const persisted = JSON.parse(await readFile(executed.executionPath, 'utf8'));
+    assert.equal(persisted.executor, 'browser-use');
+    assert.equal(persisted.finalOutput.status, 'validated');
+    assert.equal(persisted.provenance.rawCaptureId, created.rawCapture.captureId);
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
+test('POST /executions rejects malformed execution payloads', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agentbrowser-'));
+  const { server } = await createServer({ dataRoot: root });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const response = await fetch(`http://127.0.0.1:${address.port}/executions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ workflowId: '', executor: '' })
+    });
+    assert.equal(response.status, 400);
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});

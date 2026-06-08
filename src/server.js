@@ -81,6 +81,18 @@ function validateSaveWorkflowPayload(payload) {
   validateWorkflowForSave(payload.workflow);
 }
 
+function validateExecuteWorkflowPayload(payload) {
+  assertObject(payload, 'workflow execution payload');
+  assertNonEmptyString(payload.workflowId, 'workflowId');
+  assertNonEmptyString(payload.executor, 'executor');
+  if (payload.mode !== undefined) {
+    assertNonEmptyString(payload.mode, 'mode');
+  }
+  if (payload.input !== undefined) {
+    assertObject(payload.input, 'input');
+  }
+}
+
 function validateRecordingStartPayload(payload) {
   assertObject(payload, 'recording start payload');
   assertNonEmptyString(payload.title, 'title');
@@ -357,6 +369,26 @@ export async function createServer({ dataRoot = process.env.WORKFLOW_DATA_DIR ||
 
       if (req.method === 'GET' && req.url === '/workflows') {
         return json(res, 200, { items: await store.listSaved() });
+      }
+
+      if (req.method === 'GET' && /^\/workflows\/[^/]+$/.test(req.url || '')) {
+        const workflowId = req.url.split('/')[2];
+        return json(res, 200, await store.getSavedWorkflow(workflowId));
+      }
+
+      if (req.method === 'POST' && req.url === '/executions') {
+        const body = await readBody(req);
+        validateExecuteWorkflowPayload(body);
+        const execution = await store.executeWorkflow(body);
+        return json(res, 201, {
+          execution,
+          executionPath: path.join(dataRoot, 'workflow-executions', `${execution.executionId}.json`)
+        });
+      }
+
+      if (req.method === 'GET' && /^\/executions\/[^/]+$/.test(req.url || '')) {
+        const executionId = req.url.split('/')[2];
+        return json(res, 200, await store.getExecution(executionId));
       }
 
       json(res, 404, { error: 'Not found' });
