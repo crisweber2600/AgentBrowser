@@ -266,3 +266,101 @@ test('POST /executions rejects malformed execution payloads', async () => {
     await once(server, 'close');
   }
 });
+
+test('POST /executions rejects non-local baseUrl values before live fetch', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agentbrowser-'));
+  const { server } = await createServer({ dataRoot: root });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+
+    const captureResponse = await fetch(`http://127.0.0.1:${address.port}/captures`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Blocked external base URL',
+        goal: 'Reject non-local live execution targets',
+        steps: [
+          { action: 'Open dashboard', target: '/dashboard', expectedOutput: 'Dashboard renders', validationCheck: 'Main heading is visible' }
+        ]
+      })
+    });
+    const created = await captureResponse.json();
+
+    const saveResponse = await fetch(`http://127.0.0.1:${address.port}/workflows`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ draftId: created.draft.draftId, editor: 'runtime-integration-specialist', workflow: created.draft.workflow })
+    });
+    const saved = await saveResponse.json();
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/executions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        workflowId: saved.saved.workflowId,
+        executor: 'browser-use',
+        mode: 'browser-use-live',
+        input: { baseUrl: 'https://example.com' }
+      })
+    });
+
+    assert.equal(response.status, 500);
+    const body = await response.json();
+    assert.match(body.error, /host is not allowed/i);
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
+test('POST /executions rejects unexpected schemes for live execution baseUrl', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agentbrowser-'));
+  const { server } = await createServer({ dataRoot: root });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+
+    const captureResponse = await fetch(`http://127.0.0.1:${address.port}/captures`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Blocked scheme base URL',
+        goal: 'Reject unexpected schemes',
+        steps: [
+          { action: 'Open dashboard', target: '/dashboard', expectedOutput: 'Dashboard renders', validationCheck: 'Main heading is visible' }
+        ]
+      })
+    });
+    const created = await captureResponse.json();
+
+    const saveResponse = await fetch(`http://127.0.0.1:${address.port}/workflows`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ draftId: created.draft.draftId, editor: 'runtime-integration-specialist', workflow: created.draft.workflow })
+    });
+    const saved = await saveResponse.json();
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/executions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        workflowId: saved.saved.workflowId,
+        executor: 'browser-use',
+        mode: 'browser-use-live',
+        input: { baseUrl: 'file:///tmp/agentbrowser' }
+      })
+    });
+
+    assert.equal(response.status, 500);
+    const body = await response.json();
+    assert.match(body.error, /must use http or https/i);
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});

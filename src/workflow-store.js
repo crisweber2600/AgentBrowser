@@ -231,12 +231,32 @@ function normalizeBaseUrl(value) {
   if (typeof value !== 'string' || !value.trim()) {
     throw new Error('input.baseUrl must be a non-empty string for live workflow execution');
   }
-  return value.endsWith('/') ? value.slice(0, -1) : value;
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(value);
+  } catch {
+    throw new Error('input.baseUrl must be a valid absolute URL for live workflow execution');
+  }
+
+  if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+    throw new Error('input.baseUrl must use http or https');
+  }
+
+  if (!isAllowedRuntimeHost(parsedUrl.hostname)) {
+    throw new Error('input.baseUrl host is not allowed for live workflow execution');
+  }
+
+  parsedUrl.pathname = '';
+  parsedUrl.search = '';
+  parsedUrl.hash = '';
+
+  return parsedUrl.toString().endsWith('/') ? parsedUrl.toString().slice(0, -1) : parsedUrl.toString();
 }
 
 async function executeWorkflowStep({ step, baseUrl, executionId, workflowId, input, store }) {
   if (step.target.startsWith('/')) {
-    const url = new URL(step.target, `${baseUrl}/`).toString();
+    const url = buildAllowedRuntimeUrl(step.target, baseUrl).toString();
     const response = await fetch(url);
     const body = await response.text();
     const validationPassed = response.ok && bodyIncludesValidation(body, step.validationCheck, step.expectedOutput);
@@ -259,7 +279,7 @@ async function executeWorkflowStep({ step, baseUrl, executionId, workflowId, inp
   }
 
   if (step.target.startsWith('#')) {
-    const url = new URL('/runtime/export', `${baseUrl}/`).toString();
+    const url = buildAllowedRuntimeUrl('/runtime/export', baseUrl).toString();
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -297,6 +317,22 @@ async function executeWorkflowStep({ step, baseUrl, executionId, workflowId, inp
   }
 
   throw new Error(`Unsupported workflow step target: ${step.target}`);
+}
+
+function buildAllowedRuntimeUrl(targetPath, baseUrl) {
+  const base = new URL(baseUrl);
+  const resolved = new URL(targetPath, `${baseUrl}/`);
+
+  if (resolved.origin !== base.origin) {
+    throw new Error(`Resolved runtime URL leaves approved origin: ${resolved.toString()}`);
+  }
+
+  return resolved;
+}
+
+function isAllowedRuntimeHost(hostname) {
+  const normalizedHost = hostname.toLowerCase();
+  return normalizedHost === '127.0.0.1' || normalizedHost === 'localhost' || normalizedHost === '::1';
 }
 
 function bodyIncludesValidation(body, validationCheck, expectedOutput) {
