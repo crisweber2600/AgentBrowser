@@ -13,6 +13,7 @@ export async function sha256(value) {
 export class WorkflowStore {
   constructor(rootDir) {
     this.rootDir = rootDir;
+    this.recordingDir = path.join(rootDir, 'recordings');
     this.rawDir = path.join(rootDir, 'raw-captures');
     this.draftDir = path.join(rootDir, 'generated-drafts');
     this.savedDir = path.join(rootDir, 'saved-workflows');
@@ -20,10 +21,65 @@ export class WorkflowStore {
 
   async init() {
     await Promise.all([
+      mkdir(this.recordingDir, { recursive: true }),
       mkdir(this.rawDir, { recursive: true }),
       mkdir(this.draftDir, { recursive: true }),
       mkdir(this.savedDir, { recursive: true })
     ]);
+  }
+
+  async startRecordingSession(payload = {}) {
+    const recordingId = `recording_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+    const recording = {
+      recordingId,
+      startedAt: nowIso(),
+      stoppedAt: null,
+      status: 'recording',
+      metadata: {
+        title: payload.title ?? 'Untitled browser recording',
+        goal: payload.goal ?? 'Capture a browser demonstration',
+        startedBy: payload.startedBy ?? 'unknown-operator'
+      },
+      events: []
+    };
+    await writeJson(path.join(this.recordingDir, `${recordingId}.json`), recording);
+    return recording;
+  }
+
+  async appendRecordingEvent(recordingId, event) {
+    const recording = await this.getRecording(recordingId);
+    if (recording.status !== 'recording') {
+      throw new Error('Recording is not active');
+    }
+    const nextEvent = {
+      eventId: `event_${recording.events.length + 1}`,
+      recordedAt: nowIso(),
+      type: event.type,
+      selector: event.selector,
+      value: event.value ?? null,
+      note: event.note ?? null,
+      expectedOutput: event.expectedOutput ?? null
+    };
+    recording.events.push(nextEvent);
+    await writeJson(path.join(this.recordingDir, `${recordingId}.json`), recording);
+    return { recording, event: nextEvent };
+  }
+
+  async stopRecordingSession(recordingId) {
+    const recording = await this.getRecording(recordingId);
+    if (recording.status !== 'recording') {
+      return recording;
+    }
+    recording.status = 'stopped';
+    recording.stoppedAt = nowIso();
+    recording.eventCount = recording.events.length;
+    recording.recordingChecksum = await sha256(recording.events);
+    await writeJson(path.join(this.recordingDir, `${recordingId}.json`), recording);
+    return recording;
+  }
+
+  async getRecording(recordingId) {
+    return readJson(path.join(this.recordingDir, `${recordingId}.json`));
   }
 
   async recordCapture(payload) {
@@ -136,12 +192,7 @@ export function buildFieldProvenance(rawCapture, steps) {
 }
 
 function provenanceEntry(rawCaptureId, sourcePath, value, derivationMethod) {
-  return {
-    rawCaptureId,
-    sourcePath,
-    value,
-    derivationMethod
-  };
+  return { rawCaptureId, sourcePath, value, derivationMethod };
 }
 
 async function writeJson(filePath, value) {

@@ -52,7 +52,6 @@ function validateSteps(steps) {
   if (!Array.isArray(steps) || steps.length === 0) {
     throw new HttpError(400, 'steps must be a non-empty array');
   }
-
   for (const [index, step] of steps.entries()) {
     assertObject(step, `steps[${index}]`);
     assertNonEmptyString(step.action, `steps[${index}].action`);
@@ -82,12 +81,117 @@ function validateSaveWorkflowPayload(payload) {
   validateWorkflowForSave(payload.workflow);
 }
 
+function validateRecordingStartPayload(payload) {
+  assertObject(payload, 'recording start payload');
+  assertNonEmptyString(payload.title, 'title');
+  assertNonEmptyString(payload.goal, 'goal');
+}
+
+function validateRecordingEventPayload(payload) {
+  assertObject(payload, 'recording event payload');
+  assertNonEmptyString(payload.type, 'type');
+  assertNonEmptyString(payload.selector, 'selector');
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;');
+}
+
+function renderHomePage() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AgentBrowser Phase 1</title>
+  <style>
+    :root { color-scheme: light dark; font-family: sans-serif; }
+    body { margin: 2rem; max-width: 1100px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+    textarea, input { width: 100%; margin-bottom: 0.75rem; }
+    textarea { min-height: 6rem; }
+    pre { white-space: pre-wrap; padding: 1rem; border: 1px solid #9994; border-radius: 8px; }
+    button { padding: 0.7rem 1rem; margin-right: 0.5rem; }
+    .status { margin: 1rem 0; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Record / Stop browser demonstration</h1>
+  <p>Phase 1 record/stop surface for durable browser-session capture.</p>
+  <div class="grid">
+    <section>
+      <label>Recording title <input id="title" value="Demo recording" /></label>
+      <label>Recording goal <input id="goal" value="Capture a browser workflow demo" /></label>
+      <button id="start-button">Start recording</button>
+      <button id="add-event-button" disabled>Add sample event</button>
+      <button id="stop-button" disabled>Stop recording</button>
+      <div class="status" id="recording-status">No active recording.</div>
+      <pre id="recording-json">No recording yet.</pre>
+    </section>
+    <section>
+      <h2>Durable recording artifact</h2>
+      <p>Start a recording, add at least one event, then stop to create a durable recording JSON artifact with checksum and timestamps.</p>
+      <pre id="artifact-hint">Artifact path appears after stop.</pre>
+    </section>
+  </div>
+  <script>
+    let activeRecording = null;
+
+    async function refreshRecordingView(recording, artifactPath) {
+      document.getElementById('recording-json').textContent = JSON.stringify(recording, null, 2);
+      document.getElementById('artifact-hint').textContent = artifactPath || 'Artifact path appears after stop.';
+      document.getElementById('recording-status').textContent = recording.status === 'recording'
+        ? 'Recording ' + recording.recordingId + ' is active.'
+        : 'Recording ' + recording.recordingId + ' stopped with ' + (recording.eventCount || recording.events.length) + ' event(s).';
+      document.getElementById('add-event-button').disabled = recording.status !== 'recording';
+      document.getElementById('stop-button').disabled = recording.status !== 'recording';
+    }
+
+    document.getElementById('start-button').addEventListener('click', async () => {
+      const response = await fetch('/recordings/start', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          title: document.getElementById('title').value,
+          goal: document.getElementById('goal').value,
+          startedBy: 'browser-demo-ui'
+        })
+      });
+      const payload = await response.json();
+      activeRecording = payload.recording;
+      await refreshRecordingView(payload.recording, payload.recordingPath);
+    });
+
+    document.getElementById('add-event-button').addEventListener('click', async () => {
+      if (!activeRecording) return;
+      const response = await fetch('/recordings/' + activeRecording.recordingId + '/events', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          type: 'click',
+          selector: '#demo-button',
+          note: 'Sample browser event',
+          expectedOutput: 'Demo button activated'
+        })
+      });
+      const payload = await response.json();
+      activeRecording = payload.recording;
+      await refreshRecordingView(payload.recording, payload.recordingPath);
+    });
+
+    document.getElementById('stop-button').addEventListener('click', async () => {
+      if (!activeRecording) return;
+      const response = await fetch('/recordings/' + activeRecording.recordingId + '/stop', { method: 'POST' });
+      const payload = await response.json();
+      activeRecording = payload.recording;
+      await refreshRecordingView(payload.recording, payload.recordingPath);
+    });
+  </script>
+</body>
+</html>`;
 }
 
 function renderReviewPage(draft) {
@@ -176,7 +280,42 @@ export async function createServer({ dataRoot = process.env.WORKFLOW_DATA_DIR ||
       }
 
       if (req.method === 'GET' && req.url === '/') {
-        return html(res, 200, '<!doctype html><html><body><h1>AgentBrowser Phase 1</h1><p>POST /captures to record a session, then open /review/&lt;draftId&gt; to inspect, edit, and save it.</p></body></html>');
+        return html(res, 200, renderHomePage());
+      }
+
+      if (req.method === 'POST' && req.url === '/recordings/start') {
+        const body = await readBody(req);
+        validateRecordingStartPayload(body);
+        const recording = await store.startRecordingSession(body);
+        return json(res, 201, {
+          recording,
+          recordingPath: path.join(dataRoot, 'recordings', `${recording.recordingId}.json`)
+        });
+      }
+
+      if (req.method === 'POST' && /^\/recordings\/[^/]+\/events$/.test(req.url || '')) {
+        const recordingId = req.url.split('/')[2];
+        const body = await readBody(req);
+        validateRecordingEventPayload(body);
+        const { recording } = await store.appendRecordingEvent(recordingId, body);
+        return json(res, 200, {
+          recording,
+          recordingPath: path.join(dataRoot, 'recordings', `${recording.recordingId}.json`)
+        });
+      }
+
+      if (req.method === 'POST' && /^\/recordings\/[^/]+\/stop$/.test(req.url || '')) {
+        const recordingId = req.url.split('/')[2];
+        const recording = await store.stopRecordingSession(recordingId);
+        return json(res, 200, {
+          recording,
+          recordingPath: path.join(dataRoot, 'recordings', `${recording.recordingId}.json`)
+        });
+      }
+
+      if (req.method === 'GET' && /^\/recordings\/[^/]+$/.test(req.url || '')) {
+        const recordingId = req.url.split('/')[2];
+        return json(res, 200, await store.getRecording(recordingId));
       }
 
       if (req.method === 'POST' && req.url === '/captures') {
