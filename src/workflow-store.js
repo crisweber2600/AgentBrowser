@@ -2,6 +2,8 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
+let playwrightModulePromise;
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -167,16 +169,22 @@ export class WorkflowStore {
     const executionId = `execution_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
     const baseUrl = normalizeBaseUrl(input.baseUrl);
     const stepResults = [];
+    const browserSession = await createBrowserSession({ baseUrl, workflowId, executionId, input });
 
-    for (const step of workflow.steps) {
-      stepResults.push(await executeWorkflowStep({
-        step,
-        baseUrl,
-        executionId,
-        workflowId,
-        input,
-        store: this
-      }));
+    try {
+      for (const step of workflow.steps) {
+        stepResults.push(await executeWorkflowStep({
+          step,
+          baseUrl,
+          executionId,
+          workflowId,
+          input,
+          store: this,
+          browserSession
+        }));
+      }
+    } finally {
+      await browserSession.browser.close();
     }
 
     const exportedArtifacts = stepResults.filter((result) => result.outputArtifact).map((result) => result.outputArtifact);
@@ -227,6 +235,36 @@ export class WorkflowStore {
   }
 }
 
+async function getPlaywright() {
+  playwrightModulePromise ??= import('playwright');
+  return playwrightModulePromise;
+}
+
+async function createBrowserSession({ baseUrl, workflowId, executionId, input }) {
+  const { chromium } = await getPlaywright();
+  let browser;
+
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    throw new Error(`Real Browser Use runtime requires a Playwright Chromium browser: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const context = await browser.newContext({ baseURL: baseUrl });
+  await context.addInitScript(({ runtimeContext }) => {
+    window.__workflowRuntime = runtimeContext;
+  }, {
+    runtimeContext: {
+      workflowId,
+      executionId,
+      input
+    }
+  });
+
+  const page = await context.newPage();
+  return { browser, context, page };
+}
+
 function normalizeBaseUrl(value) {
   if (typeof value !== 'string' || !value.trim()) {
     throw new Error('input.baseUrl must be a non-empty string for live workflow execution');
@@ -254,12 +292,12 @@ function normalizeBaseUrl(value) {
   return parsedUrl.toString().endsWith('/') ? parsedUrl.toString().slice(0, -1) : parsedUrl.toString();
 }
 
-async function executeWorkflowStep({ step, baseUrl, executionId, workflowId, input, store }) {
+async function executeWorkflowStep({ step, baseUrl, executionId, workflowId, input, store, browserSession }) {
   if (step.target.startsWith('/')) {
     const url = buildAllowedRuntimeUrl(step.target, baseUrl).toString();
-    const response = await fetch(url);
-    const body = await response.text();
-    const validationPassed = response.ok && bodyIncludesValidation(body, step.validationCheck, step.expectedOutput);
+    const response = await browserSession.page.goto(url, { waitUntil: 'domcontentloaded' });
+    const body = await browserSession.page.textContent('body');
+    const validationPassed = Boolean(response?.ok()) && bodyIncludesValidation(body ?? '', step.validationCheck, step.expectedOutput);
 
     return {
       stepNumber: step.stepNumber,
@@ -268,31 +306,40 @@ async function executeWorkflowStep({ step, baseUrl, executionId, workflowId, inp
       expectedOutput: step.expectedOutput,
       status: validationPassed ? 'completed' : 'failed',
       validationCheck: step.validationCheck,
-      observedOutput: summarizeObservedOutput(body, step.expectedOutput),
+      observedOutput: summarizeObservedOutput(body ?? '', step.expectedOutput),
       executedAt: nowIso(),
       runtimeRequest: {
-        method: 'GET',
+        method: 'BROWSER_GOTO',
         url,
-        statusCode: response.status
+        statusCode: response?.status() ?? null
+      },
+      browserEvidence: {
+        currentUrl: browserSession.page.url(),
+        mode: 'playwright-chromium-headless'
       }
     };
   }
 
   if (step.target.startsWith('#')) {
-    const url = buildAllowedRuntimeUrl('/runtime/export', baseUrl).toString();
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        workflowId,
-        executionId,
-        selector: step.target,
-        action: step.action,
-        input
-      })
-    });
-    const outputArtifact = await response.json();
-    const validationPassed = response.ok && typeof outputArtifact.outputId === 'string';
+    const dashboardUrl = buildAllowedRuntimeUrl('/dashboard', baseUrl).toString();
+    if (!browserSession.page.url().startsWith(dashboardUrl)) {
+      await browserSession.page.goto(dashboardUrl, { waitUntil: 'domcontentloaded' });
+    }
+
+    await browserSession.page.waitForSelector(step.target, { state: 'visible' });
+    await browserSession.page.click(step.target);
+    await browserSession.page.waitForSelector('#export-toast[data-export-status="validated"]', { state: 'attached' });
+
+    const outputArtifact = await browserSession.page.locator('#export-toast').evaluate((element) => ({
+      outputId: element.getAttribute('data-output-id'),
+      status: element.getAttribute('data-export-status'),
+      statusCode: Number(element.getAttribute('data-export-status-code') || '0'),
+      readbackPath: element.getAttribute('data-readback-path')
+    }));
+    const validationText = await browserSession.page.textContent('#export-toast');
+    const validationPassed = outputArtifact.status === 'validated'
+      && typeof outputArtifact.outputId === 'string'
+      && bodyIncludesValidation(validationText ?? '', step.validationCheck, step.expectedOutput);
 
     return {
       stepNumber: step.stepNumber,
@@ -301,17 +348,23 @@ async function executeWorkflowStep({ step, baseUrl, executionId, workflowId, inp
       expectedOutput: step.expectedOutput,
       status: validationPassed ? 'completed' : 'failed',
       validationCheck: step.validationCheck,
-      observedOutput: outputArtifact.status ?? 'runtime export attempted',
+      observedOutput: validationText ?? outputArtifact.status ?? 'runtime export attempted',
       executedAt: nowIso(),
       runtimeRequest: {
-        method: 'POST',
-        url,
-        statusCode: response.status
+        method: 'BROWSER_CLICK',
+        url: dashboardUrl,
+        statusCode: outputArtifact.statusCode
+      },
+      browserEvidence: {
+        currentUrl: browserSession.page.url(),
+        selector: step.target,
+        mode: 'playwright-chromium-headless'
       },
       outputArtifact: {
         outputId: outputArtifact.outputId,
         path: path.join(store.runtimeOutputDir, `${outputArtifact.outputId}.json`),
-        status: outputArtifact.status
+        status: outputArtifact.status,
+        readbackPath: outputArtifact.readbackPath
       }
     };
   }

@@ -231,15 +231,22 @@ test('saved workflow can execute into a durable validation artifact', async () =
     assert.equal(executed.execution.stepResults.length, 2);
     assert.ok(executed.execution.executionChecksum);
     assert.equal(executed.execution.mode, 'browser-use-live');
+    assert.equal(executed.execution.stepResults[0].runtimeRequest.method, 'BROWSER_GOTO');
     assert.equal(executed.execution.stepResults[0].runtimeRequest.statusCode, 200);
+    assert.equal(executed.execution.stepResults[0].browserEvidence.mode, 'playwright-chromium-headless');
+    assert.match(executed.execution.stepResults[0].browserEvidence.currentUrl, /\/dashboard$/);
+    assert.equal(executed.execution.stepResults[1].runtimeRequest.method, 'BROWSER_CLICK');
     assert.equal(executed.execution.stepResults[1].runtimeRequest.statusCode, 201);
+    assert.equal(executed.execution.stepResults[1].browserEvidence.selector, '#export');
     assert.equal(executed.execution.stepResults[1].outputArtifact.status, 'validated');
+    assert.match(executed.execution.stepResults[1].outputArtifact.readbackPath, /^\/exports\//);
     assert.equal(executed.execution.finalOutput.exportedArtifacts.length, 1);
 
     const persisted = JSON.parse(await readFile(executed.executionPath, 'utf8'));
     assert.equal(persisted.executor, 'browser-use');
     assert.equal(persisted.finalOutput.status, 'validated');
     assert.equal(persisted.provenance.rawCaptureId, created.rawCapture.captureId);
+    assert.equal(persisted.stepResults[0].browserEvidence.mode, 'playwright-chromium-headless');
     assert.equal(persisted.stepResults[1].outputArtifact.status, 'validated');
   } finally {
     server.close();
@@ -417,7 +424,9 @@ test('POST /executions accepts IPv6 loopback baseUrl values for live execution',
     assert.equal(executionResponse.status, 201);
     const executed = await executionResponse.json();
     assert.equal(executed.execution.validation.status, 'passed');
+    assert.equal(executed.execution.stepResults[0].runtimeRequest.method, 'BROWSER_GOTO');
     assert.equal(executed.execution.stepResults[0].runtimeRequest.statusCode, 200);
+    assert.equal(executed.execution.stepResults[1].runtimeRequest.method, 'BROWSER_CLICK');
     assert.equal(executed.execution.stepResults[1].runtimeRequest.statusCode, 201);
   } finally {
     server.close();

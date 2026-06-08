@@ -303,6 +303,32 @@ function renderDashboardPage() {
     <button id="export">Export</button>
     <div id="export-toast">Export toast appears</div>
   </main>
+  <script>
+    const exportButton = document.getElementById('export');
+    const exportToast = document.getElementById('export-toast');
+
+    exportButton.addEventListener('click', async () => {
+      const runtimeContext = window.__workflowRuntime || {};
+      const response = await fetch('/runtime/export', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          workflowId: runtimeContext.workflowId || 'unknown-workflow',
+          executionId: runtimeContext.executionId || 'unknown-execution',
+          selector: '#export',
+          action: 'Click export',
+          input: runtimeContext.input || {}
+        })
+      });
+
+      const payload = await response.json();
+      exportToast.textContent = response.ok ? 'Export toast appears' : (payload.error || 'Export failed');
+      exportToast.dataset.exportStatus = payload.status || 'failed';
+      exportToast.dataset.outputId = payload.outputId || '';
+      exportToast.dataset.readbackPath = payload.readbackPath || '';
+      exportToast.dataset.exportStatusCode = String(response.status);
+    });
+  </script>
 </body>
 </html>`;
 }
