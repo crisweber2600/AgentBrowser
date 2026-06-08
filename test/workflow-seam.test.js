@@ -433,3 +433,123 @@ test('POST /executions accepts IPv6 loopback baseUrl values for live execution',
     await once(server, 'close');
   }
 });
+
+test('integrated closure proof preserves record to draft to saved workflow to live execution to export readback', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agentbrowser-'));
+  const { server } = await createServer({ dataRoot: root });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const startResponse = await fetch(`${baseUrl}/recordings/start`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Integrated closure proof recording',
+        goal: 'Prove record, save, execute, and export continuity'
+      })
+    });
+    assert.equal(startResponse.status, 201);
+    const started = await startResponse.json();
+
+    const eventOneResponse = await fetch(`${baseUrl}/recordings/${started.recording.recordingId}/events`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'goto',
+        selector: '/dashboard',
+        detail: 'Open the dashboard view'
+      })
+    });
+    assert.equal(eventOneResponse.status, 200);
+
+    const eventTwoResponse = await fetch(`${baseUrl}/recordings/${started.recording.recordingId}/events`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'click',
+        selector: '#export',
+        detail: 'Trigger workflow export'
+      })
+    });
+    assert.equal(eventTwoResponse.status, 200);
+
+    const stopResponse = await fetch(`${baseUrl}/recordings/${started.recording.recordingId}/stop`, {
+      method: 'POST'
+    });
+    assert.equal(stopResponse.status, 200);
+    const stopped = await stopResponse.json();
+    assert.equal(stopped.recording.eventCount, 2);
+
+    const captureResponse = await fetch(`${baseUrl}/captures`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Integrated closure proof capture',
+        goal: 'Generate an editable workflow from a durable recording and prove live execution output',
+        steps: [
+          { action: 'Open dashboard', target: '/dashboard', expectedOutput: 'Dashboard renders', validationCheck: 'Main heading is visible' },
+          { action: 'Click export', target: '#export', expectedOutput: 'Export starts', validationCheck: 'Export toast appears' }
+        ]
+      })
+    });
+    assert.equal(captureResponse.status, 201);
+    const created = await captureResponse.json();
+
+    const saveResponse = await fetch(`${baseUrl}/workflows`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        draftId: created.draft.draftId,
+        editor: 'ceo-phase-3-proof',
+        workflow: created.draft.workflow
+      })
+    });
+    assert.equal(saveResponse.status, 201);
+    const saved = await saveResponse.json();
+
+    const executionResponse = await fetch(`${baseUrl}/executions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        workflowId: saved.saved.workflowId,
+        executor: 'browser-use',
+        mode: 'browser-use-live',
+        input: {
+          source: stopped.recording.recordingId,
+          recordingId: stopped.recording.recordingId,
+          baseUrl
+        }
+      })
+    });
+    assert.equal(executionResponse.status, 201);
+    const executed = await executionResponse.json();
+
+    assert.equal(executed.execution.validation.status, 'passed');
+    assert.equal(executed.execution.provenance.rawCaptureId, created.rawCapture.captureId);
+    assert.equal(executed.execution.stepResults.length, 2);
+    assert.equal(executed.execution.stepResults[0].runtimeRequest.method, 'BROWSER_GOTO');
+    assert.equal(executed.execution.stepResults[1].runtimeRequest.method, 'BROWSER_CLICK');
+    assert.equal(executed.execution.finalOutput.exportedArtifacts.length, 1);
+    assert.match(executed.execution.finalOutput.exportedArtifacts[0].readbackPath, /^\/exports\//);
+
+    const persistedExecution = JSON.parse(await readFile(executed.executionPath, 'utf8'));
+    const persistedRecording = JSON.parse(await readFile(stopped.recordingPath, 'utf8'));
+    const persistedSavedWorkflow = JSON.parse(await readFile(saved.savedPath, 'utf8'));
+
+    assert.equal(persistedRecording.recordingId, stopped.recording.recordingId);
+    assert.equal(persistedRecording.eventCount, 2);
+    assert.equal(persistedSavedWorkflow.provenance.rawCaptureId, created.rawCapture.captureId);
+    assert.equal(persistedExecution.workflowId, saved.saved.workflowId);
+    assert.equal(persistedExecution.input.recordingId, stopped.recording.recordingId);
+    assert.equal(persistedExecution.finalOutput.status, 'validated');
+    assert.equal(persistedExecution.finalOutput.exportedArtifacts[0].status, 'validated');
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
