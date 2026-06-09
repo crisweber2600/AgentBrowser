@@ -339,7 +339,8 @@ async function executeWorkflowStep({ step, baseUrl, executionId, workflowId, inp
     const validationText = await browserSession.page.textContent('#export-toast');
     const validationPassed = outputArtifact.status === 'validated'
       && typeof outputArtifact.outputId === 'string'
-      && bodyIncludesValidation(validationText ?? '', step.validationCheck, step.expectedOutput);
+      && bodyIncludesValidation(validationText ?? '', step.validationCheck, step.expectedOutput)
+      && outputMatchesExpectation(validationText ?? '', step.expectedOutput);
 
     return {
       stepNumber: step.stepNumber,
@@ -398,6 +399,22 @@ function bodyIncludesValidation(body, validationCheck, expectedOutput) {
     .map((value) => value.toLowerCase());
   const loweredBody = body.toLowerCase();
   return checks.some((value) => loweredBody.includes(value.toLowerCase())) || checks.length === 0;
+}
+
+function outputMatchesExpectation(observedOutput, expectedOutput) {
+  if (typeof observedOutput !== 'string' || !observedOutput.trim()) {
+    return false;
+  }
+
+  if (typeof expectedOutput !== 'string' || !expectedOutput.trim()) {
+    return true;
+  }
+
+  const loweredObserved = observedOutput.toLowerCase();
+  const loweredExpected = expectedOutput.toLowerCase();
+
+  return loweredObserved.includes(loweredExpected)
+    || (loweredExpected.includes('export') && loweredObserved.includes('export') && loweredObserved.includes('appear'));
 }
 
 function summarizeObservedOutput(body, expectedOutput) {
