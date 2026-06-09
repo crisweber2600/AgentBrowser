@@ -19,6 +19,7 @@ export class WorkflowStore {
     this.rawDir = path.join(rootDir, 'raw-captures');
     this.draftDir = path.join(rootDir, 'generated-drafts');
     this.savedDir = path.join(rootDir, 'saved-workflows');
+    this.extensionDir = path.join(rootDir, 'browser-extensions');
     this.executionDir = path.join(rootDir, 'workflow-executions');
     this.runtimeOutputDir = path.join(rootDir, 'runtime-outputs');
   }
@@ -29,6 +30,7 @@ export class WorkflowStore {
       mkdir(this.rawDir, { recursive: true }),
       mkdir(this.draftDir, { recursive: true }),
       mkdir(this.savedDir, { recursive: true }),
+      mkdir(this.extensionDir, { recursive: true }),
       mkdir(this.executionDir, { recursive: true }),
       mkdir(this.runtimeOutputDir, { recursive: true })
     ]);
@@ -122,8 +124,10 @@ export class WorkflowStore {
 
   async saveWorkflow({ draftId, editor, workflow }) {
     const sourceDraft = await this.getDraft(draftId);
+    const workflowId = `workflow_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+    const extensionPackage = await buildExtensionPackage({ workflowId, workflow, sourceDraft });
     const version = {
-      workflowId: `workflow_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`,
+      workflowId,
       savedAt: nowIso(),
       editor,
       provenance: {
@@ -132,9 +136,11 @@ export class WorkflowStore {
         rawCaptureChecksum: sourceDraft.provenance.rawCaptureChecksum
       },
       fieldProvenance: sourceDraft.fieldProvenance,
+      extensionPackage,
       workflow
     };
     await writeJson(path.join(this.savedDir, `${version.workflowId}.json`), version);
+    await writeExtensionPackage(this.extensionDir, version.workflowId, extensionPackage);
     return version;
   }
 
@@ -422,6 +428,83 @@ function summarizeObservedOutput(body, expectedOutput) {
     return expectedOutput;
   }
   return body.replace(/\s+/g, ' ').trim().slice(0, 160);
+}
+
+async function buildExtensionPackage({ workflowId, workflow, sourceDraft }) {
+  const manifest = {
+    manifest_version: 3,
+    name: `${workflow.title} Browser Extension`,
+    version: '0.1.0',
+    description: workflow.goal,
+    action: {
+      default_title: workflow.title,
+      default_popup: 'popup.html'
+    },
+    permissions: ['storage'],
+    host_permissions: ['http://127.0.0.1/*', 'http://localhost/*', 'http://[::1]/*']
+  };
+
+  const workflowSummary = {
+    workflowId,
+    goal: workflow.goal,
+    successCriteria: workflow.successCriteria,
+    steps: workflow.steps,
+    provenance: {
+      draftId: sourceDraft.draftId,
+      rawCaptureId: sourceDraft.provenance.rawCaptureId,
+      rawCaptureChecksum: sourceDraft.provenance.rawCaptureChecksum
+    }
+  };
+
+  return {
+    packageId: `extension_${workflowId}`,
+    generatedAt: nowIso(),
+    manifest,
+    files: {
+      'manifest.json': JSON.stringify(manifest, null, 2),
+      'popup.html': renderExtensionPopupHtml(workflow.title),
+      'popup.js': renderExtensionPopupScript(workflowSummary),
+      'workflow.json': JSON.stringify(workflowSummary, null, 2)
+    },
+    entrypoints: {
+      popup: 'popup.html',
+      workflow: 'workflow.json'
+    }
+  };
+}
+
+async function writeExtensionPackage(extensionRootDir, workflowId, extensionPackage) {
+  const packageDir = path.join(extensionRootDir, workflowId);
+  await mkdir(packageDir, { recursive: true });
+  await Promise.all(Object.entries(extensionPackage.files).map(([fileName, contents]) => writeFile(path.join(packageDir, fileName), contents)));
+}
+
+function renderExtensionPopupHtml(title) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtmlForExtension(title)}</title>
+</head>
+<body>
+  <h1 id="workflow-title">${escapeHtmlForExtension(title)}</h1>
+  <pre id="workflow-output">Loading workflow package…</pre>
+  <script src="popup.js"></script>
+</body>
+</html>`;
+}
+
+function renderExtensionPopupScript(workflowSummary) {
+  return `const workflowPackage = ${JSON.stringify(workflowSummary, null, 2)};
+document.getElementById('workflow-output').textContent = JSON.stringify(workflowPackage, null, 2);`;
+}
+
+function escapeHtmlForExtension(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
 }
 
 export function buildWorkflowPackage(payload, steps) {

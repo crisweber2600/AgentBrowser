@@ -553,3 +553,64 @@ test('integrated closure proof preserves record to draft to saved workflow to li
     await once(server, 'close');
   }
 });
+
+test('saved workflow emits a browser extension package artifact with workflow provenance', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agentbrowser-'));
+  const { server } = await createServer({ dataRoot: root });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const captureResponse = await fetch(`${baseUrl}/captures`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Extension-ready capture',
+        goal: 'Generate an editable workflow and extension artifact',
+        steps: [
+          { action: 'Open dashboard', target: '/dashboard', expectedOutput: 'Dashboard renders', validationCheck: 'Main heading is visible' },
+          { action: 'Click export', target: '#export', expectedOutput: 'Export starts', validationCheck: 'Export toast appears' }
+        ]
+      })
+    });
+    assert.equal(captureResponse.status, 201);
+    const created = await captureResponse.json();
+
+    const saveResponse = await fetch(`${baseUrl}/workflows`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        draftId: created.draft.draftId,
+        editor: 'runtime-integration-specialist',
+        workflow: created.draft.workflow
+      })
+    });
+    assert.equal(saveResponse.status, 201);
+    const saved = await saveResponse.json();
+
+    assert.equal(saved.saved.extensionPackage.manifest.manifest_version, 3);
+    assert.equal(saved.saved.extensionPackage.entrypoints.popup, 'popup.html');
+    assert.equal(saved.saved.extensionPackage.entrypoints.workflow, 'workflow.json');
+    assert.ok(saved.saved.extensionPackage.files['manifest.json']);
+    assert.ok(saved.saved.extensionPackage.files['popup.html']);
+    assert.ok(saved.saved.extensionPackage.files['popup.js']);
+    assert.ok(saved.saved.extensionPackage.files['workflow.json']);
+
+    const persistedSavedWorkflow = JSON.parse(await readFile(saved.savedPath, 'utf8'));
+    assert.equal(persistedSavedWorkflow.extensionPackage.manifest.action.default_popup, 'popup.html');
+    assert.equal(persistedSavedWorkflow.extensionPackage.files['workflow.json'].includes(created.rawCapture.captureId), true);
+
+    const extensionManifest = JSON.parse(await readFile(path.join(root, 'browser-extensions', saved.saved.workflowId, 'manifest.json'), 'utf8'));
+    const extensionWorkflow = JSON.parse(await readFile(path.join(root, 'browser-extensions', saved.saved.workflowId, 'workflow.json'), 'utf8'));
+    assert.equal(extensionManifest.manifest_version, 3);
+    assert.equal(extensionWorkflow.provenance.rawCaptureId, created.rawCapture.captureId);
+    assert.equal(extensionWorkflow.workflowId, saved.saved.workflowId);
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
