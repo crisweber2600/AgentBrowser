@@ -175,6 +175,26 @@ test('home page exposes record and stop browser session controls', async () => {
   }
 });
 
+test('server startup emits a bootstrap browser extension package scaffold', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agentbrowser-'));
+  const { server } = await createServer({ dataRoot: root });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  try {
+    const manifest = JSON.parse(await readFile(path.join(root, 'browser-extensions', 'bootstrap-extension', 'manifest.json'), 'utf8'));
+    const workflowPackage = JSON.parse(await readFile(path.join(root, 'browser-extensions', 'bootstrap-extension', 'workflow.json'), 'utf8'));
+
+    assert.equal(manifest.manifest_version, 3);
+    assert.equal(manifest.action.default_popup, 'popup.html');
+    assert.equal(workflowPackage.workflowId, 'bootstrap-extension');
+    assert.equal(workflowPackage.provenance.rawCaptureId, 'bootstrap-template');
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
 test('saved workflow can execute into a durable validation artifact', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agentbrowser-'));
   const { server } = await createServer({ dataRoot: root });

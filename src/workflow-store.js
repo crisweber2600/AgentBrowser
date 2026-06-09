@@ -34,6 +34,8 @@ export class WorkflowStore {
       mkdir(this.executionDir, { recursive: true }),
       mkdir(this.runtimeOutputDir, { recursive: true })
     ]);
+
+    await ensureBootstrapExtensionPackage(this.extensionDir);
   }
 
   async startRecordingSession(payload = {}) {
@@ -475,6 +477,69 @@ async function buildExtensionPackage({ workflowId, workflow, sourceDraft }) {
 
 async function writeExtensionPackage(extensionRootDir, workflowId, extensionPackage) {
   const packageDir = path.join(extensionRootDir, workflowId);
+  await mkdir(packageDir, { recursive: true });
+  await Promise.all(Object.entries(extensionPackage.files).map(([fileName, contents]) => writeFile(path.join(packageDir, fileName), contents)));
+}
+
+async function ensureBootstrapExtensionPackage(extensionRootDir) {
+  const packageDir = path.join(extensionRootDir, 'bootstrap-extension');
+  const workflowSummary = {
+    workflowId: 'bootstrap-extension',
+    goal: 'Load the extension scaffold and then generate a saved workflow-specific package.',
+    successCriteria: [
+      'Extension scaffold files exist after startup',
+      'Saved workflows can emit workflow-specific extension packages with provenance'
+    ],
+    steps: [
+      {
+        stepNumber: 1,
+        action: 'Load extension scaffold',
+        target: 'browser-extensions/bootstrap-extension',
+        expectedOutput: 'Extension scaffold is available after startup'
+      },
+      {
+        stepNumber: 2,
+        action: 'Generate saved workflow package',
+        target: '/workflows',
+        expectedOutput: 'Workflow-specific extension package is emitted with provenance'
+      }
+    ],
+    provenance: {
+      draftId: 'bootstrap-template',
+      rawCaptureId: 'bootstrap-template',
+      rawCaptureChecksum: 'bootstrap-template'
+    }
+  };
+
+  const manifest = {
+    manifest_version: 3,
+    name: 'AgentBrowser Bootstrap Extension',
+    version: '0.1.0',
+    description: 'Startup scaffold proving the browser extension package surface exists.',
+    action: {
+      default_title: 'AgentBrowser Bootstrap Extension',
+      default_popup: 'popup.html'
+    },
+    permissions: ['storage'],
+    host_permissions: ['http://127.0.0.1/*', 'http://localhost/*', 'http://[::1]/*']
+  };
+
+  const extensionPackage = {
+    packageId: 'extension_bootstrap-extension',
+    generatedAt: nowIso(),
+    manifest,
+    files: {
+      'manifest.json': JSON.stringify(manifest, null, 2),
+      'popup.html': renderExtensionPopupHtml('AgentBrowser Bootstrap Extension'),
+      'popup.js': renderExtensionPopupScript(workflowSummary),
+      'workflow.json': JSON.stringify(workflowSummary, null, 2)
+    },
+    entrypoints: {
+      popup: 'popup.html',
+      workflow: 'workflow.json'
+    }
+  };
+
   await mkdir(packageDir, { recursive: true });
   await Promise.all(Object.entries(extensionPackage.files).map(([fileName, contents]) => writeFile(path.join(packageDir, fileName), contents)));
 }
